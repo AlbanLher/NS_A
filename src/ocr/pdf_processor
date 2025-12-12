@@ -1,0 +1,197 @@
+import PyPDF2 , pdfplumber, pytesseract
+import io, re, random
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from pdf2image import convert_from_path
+import easyocr, camelot, tabula
+from pdf2image import convert_from_path
+from PIL import Image, ImageEnhance, ImageFilter
+import cv2
+import logging
+
+dossier_cible = Path('../data/raw')
+
+def detect_pdf_type(pdf_path):
+    with open(pdf_path, 'rb') as file:
+        reader = PyPDF2.PdfReader(file)
+        first_page = reader.pages[0]
+
+        # Vérifier si le PDF contient du texte natif
+        if "/Font" in first_page['/Resources']:
+            return "native_text"
+
+        # Sinon, vérifier s'il s'agit d'un scan (images)
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                page = pdf.pages[0]
+                if page.chars:  # Si des caractères sont détectés
+                    return "native_text"
+                else:
+                    return "scanned"
+        except:
+            return "complex"  # Cas par défaut pour les PDF complexes
+
+def extract_text_native(pdf_path):   # native 
+    with pdfplumber.open(pdf_path) as pdf:
+        text = ""
+        for page in pdf.pages:
+            text += page.extract_text() + "\n"
+    return text
+
+def extract_text_pypdf2(pdf_path):   # native type back_up
+    with open(pdf_path, 'rb') as file:
+        reader = PyPDF2.PdfReader(file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+    return text
+
+def extract_text_scanned(pdf_path):  # scaned
+    images = convert_from_path(pdf_path)
+    text = ""
+    for img in images:
+        text += pytesseract.image_to_string(img, lang='fra+eng') + "\n"
+    return text
+
+
+def extract_text_easyocr(pdf_path):
+    reader = easyocr.Reader(['fr', 'en'])
+    images = convert_from_path(pdf_path)
+    text = ""
+    for img in images:
+        # Convertir PIL.Image en tableau numpy
+        img_array = np.array(img)
+        results = reader.readtext(img_array)
+        text += "\n".join([res[1] for res in results]) + "\n"
+    return text
+
+def extract_tables(pdf_path):         # complex
+    tables = camelot.read_pdf(pdf_path, flavor='stream')
+    return [table.df.to_dict() for table in tables]
+
+def extract_tables_tabula(pdf_path):  # alternative camelot
+    tables = tabula.read_pdf(pdf_path, pages='all', multiple_tables=True)
+    return tables
+
+def extract_complex_pdf(pdf_path):
+    with pdfplumber.open(pdf_path) as pdf:
+        text = ""
+        for page in pdf.pages:
+            # Extraire le texte natif
+            text += page.extract_text() + "\n"
+
+            # Extraire les images (OCR)
+            for img in page.images:
+                img_data = img.to_image().original
+                img_pil = Image.open(io.BytesIO(img_data))
+                text += pytesseract.image_to_string(img_pil, lang='fra+eng') + "\n"
+    return text
+
+def clean_text(text):
+    # Supprimer les espaces multiples
+    text = re.sub(r'\s+', ' ', text)
+    # Supprimer les sauts de ligne excessifs
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Supprimer les caractères non imprimables
+    text = re.sub(r'[^\x20-\x7E\n]', '', text)
+    return text.strip()
+
+def extract_text(pdf_path):
+    pdf_type = detect_pdf_type(pdf_path)
+    print("TYPE DE FICHIER : ",pdf_type)
+    if pdf_type == "native_text":
+        try:
+            return clean_text(extract_text_native(pdf_path)),None,pdf_type
+        except:
+            return clean_text(extract_text_pypdf2(pdf_path)),None,pdf_type
+
+    elif pdf_type == "scanned":
+        try:
+            return clean_text(extract_text_scanned(pdf_path)),None,pdf_type
+        except:
+            return clean_text(extract_text_easyocr(pdf_path)),None,pdf_type
+
+    else:  # complex
+        try:
+            tables = extract_tables(pdf_path)
+            text = extract_complex_pdf(pdf_path)
+            return clean_text(text), tables, pdf_type
+        except:
+            return "Échec de l'extraction pour ce document.",None,pdf_type
+
+def preprocess_image(img):
+    # Convertir en niveaux de gris
+    img = img.convert('L')
+    # Augmenter le contraste
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    # Appliquer un filtre pour réduire le bruit
+    img = img.filter(ImageFilter.MedianFilter(size=3))
+    # Seuil adaptatif (binarisation)
+    img = cv2.adaptiveThreshold(
+        np.array(img),
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,
+        2
+    )
+    return Image.fromarray(img)
+
+# Exemple d'utilisation dans extract_text_scanned
+def extract_text_scanned_2(pdf_path):
+    images = convert_from_path(pdf_path)
+    text = ""
+    for img in images:
+        processed_img = preprocess_image(img)
+        text += pytesseract.image_to_string(processed_img, lang='fra+eng') + "\n"
+    return text
+
+logging.basicConfig(filename='ocr_errors.log', level=logging.ERROR)
+
+def safe_extract(pdf_path):
+    try:
+        pdf_type = detect_pdf_type(pdf_path)
+        if pdf_type == "native_text":
+            return extract_text_native(pdf_path)
+        elif pdf_type == "scanned":
+            return extract_text_scanned(pdf_path)
+        else:
+            return extract_complex_pdf(pdf_path)
+    except Exception as e:
+        logging.error(f"Échec pour {pdf_path}: {str(e)}")
+        return None
+
+
+
+
+# 2. Vérifier si le dossier existe
+if not dossier_cible.exists():
+    print(f"Le dossier {dossier_cible} n'existe pas !")
+else:
+    print(f"--- Recherche de PDF dans : {dossier_cible.resolve()} ---")
+ 
+    fichiers_pdf = list(dossier_cible.glob('*.pdf'))
+    df = pd.DataFrame(columns=["Nom","Type"]) 
+
+
+    if not fichiers_pdf:
+        print("Aucun fichier PDF trouvé.")
+    else:
+        for fichier in fichiers_pdf:
+            print(f"Trouvé : {fichier.name}")
+            pdf_type = detect_pdf_type(f"../data/{fichier}")
+            print(f"Type de PDF : {pdf_type}")
+            df.loc[len(df.index)] = [fichier.name, pdf_type]    
+
+print("--- Fin de la liste ---")
+df.to_csv("../data/liste_des_fichiers_pdf_type.csv", sep=';')
+
+
+i = random.randint(0, len(df) - 1)
+nm = df.iloc[i]["Nom"]
+pdf_path = f"../data/{nm}"
+print("\nFICHIER SELECTIONNE : \n",nm)
+
+extracted_text = safe_extract(pdf_path)
+

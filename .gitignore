@@ -1,1 +1,17 @@
-/data/
+# Environnements virtuels
+venv/
+.env
+.venv
+
+# Cache et logs
+data/cache/
+*.log
+*.pyc
+__pycache__/
+
+# Fichiers IDE
+.idea/
+.vscode/
+
+# Données sensibles
+config/*.yaml  # Si tu commites des fichiers de config avec des mots de passe
